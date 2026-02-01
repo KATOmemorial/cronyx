@@ -1,0 +1,42 @@
+services:
+  # MySQL 8.0
+  mysql:
+    image: mysql:8.0
+    container_name: cronyx-mysql
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: cronyx
+    command: --default-authentication-plugin=mysql_native_password
+    volumes:
+      - ./mysql_data:/var/lib/mysql
+
+  # Redis
+  redis:
+    image: redis:alpine
+    container_name: cronyx-redis
+    ports:
+      - "6379:6379"
+
+  # Zookeeper (Kafka依赖)
+  zookeeper:
+    image: wurstmeister/zookeeper
+    container_name: cronyx-zookeeper
+    ports:
+      - "2181:2181"
+
+  # Kafka
+  kafka:
+    image: wurstmeister/kafka
+    container_name: cronyx-kafka
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_ADVERTISED_HOST_NAME: localhost
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENERS: PLAINTEXT://:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      KAFKA_CREATE_TOPICS: "cronyx-jobs:1:1"
+    depends_on:
+      - zookeeper

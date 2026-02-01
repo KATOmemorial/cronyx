@@ -1,0 +1,23 @@
+# --- Build Binaries ---
+/cronyx-api
+/cronyx-scheduler
+/cronyx-worker
+/main
+*.exe
+*.dll
+*.so
+*.dylib
+
+# --- IDE Settings ---
+.vscode/
+.idea/
+
+# --- OS Files ---
+.DS_Store
+Thumbs.db
+
+# --- Data & Logs ---
+data/
+logs/
+mysql_data/
+*.log
