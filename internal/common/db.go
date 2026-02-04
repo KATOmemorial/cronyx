@@ -21,7 +21,7 @@ func InitDB() {
 		log.Fatalf("Failed to connect to MySQL: %v", err)
 	}
 
-	err = DB.AutoMigrate(&model.JobInfo{})
+	err = DB.AutoMigrate(&model.JobInfo{}, &model.JobLog{})
 	if err != nil {
 		log.Fatalf("Failed to migrate datebase: %v", err)
 	}

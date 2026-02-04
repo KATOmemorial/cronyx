@@ -5,12 +5,18 @@ import (
 	"fmt"
 	"log"
 	"os/exec"
+	"strconv"
+	"strings"
+	"time"
 
 	"github.com/IBM/sarama"
 	"github.com/KATOmemorial/cronyx/internal/common"
+	"github.com/KATOmemorial/cronyx/internal/model"
 )
 
 func main() {
+	common.InitDB()
+
 	consumer, err := sarama.NewConsumer([]string{"localhost:9092"}, nil)
 	if err != nil {
 		log.Fatalf("Failed to start Sarama consumer: %v", err)
@@ -23,7 +29,7 @@ func main() {
 	}
 	defer partitionConsumer.Close()
 
-	fmt.Println("Worker started! Waiting for tasks...")
+	fmt.Println("Worker started! Ready to execute jobs and report logs...")
 
 	for msg := range partitionConsumer.Messages() {
 		var event common.TaskEvent
@@ -33,15 +39,38 @@ func main() {
 			continue
 		}
 
-		fmt.Printf("[Worker] Received task: %s | Command: %s\n", event.TaskID, event.Command)
+		fmt.Printf("Executing Job: %s | Cmd: %s\n", event.TaskID, event.Command)
+
+		parts := strings.Split(event.TaskID, "-")
+		jobID, _ := strconv.Atoi(parts[0])
+
+		jobLog := model.JobLog{
+			JobID:     uint(jobID),
+			Command:   event.Command,
+			PlanTime:  event.Timestamp,
+			RealTime:  time.Now().Unix(),
+			StartTime: time.Now().UnixMilli(),
+		}
 
 		cmd := exec.Command("/bin/sh", "-c", event.Command)
 		output, err := cmd.CombinedOutput()
 
+		jobLog.EndTime = time.Now().UnixMilli()
+		jobLog.Output = string(output)
+
 		if err != nil {
-			fmt.Printf("Execution Failed: %d\n", err)
+			jobLog.Status = 0
+			jobLog.Error = err.Error()
+			fmt.Printf("Failed: %s\n", err)
 		} else {
-			fmt.Printf("Output: %s", string(output))
+			jobLog.Status = 1
+			fmt.Printf("Success: %s", string(output))
 		}
+
+		go func(logData model.JobLog) {
+			if err := common.DB.Create(&logData).Error; err != nil {
+				log.Printf("Failed to save log: %v", err)
+			}
+		}(jobLog)
 	}
 }

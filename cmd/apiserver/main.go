@@ -40,5 +40,17 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"data": jobs})
 	})
 
+	r.GET("/job/:id/logs", func(c *gin.Context) {
+		jobID := c.Param("id")
+		var logs []model.JobLog
+
+		if err := common.DB.Where("job_id = ?", jobID).Order("id desc").Limit(20).Find(&logs).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch logs"})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{"data": logs})
+	})
+
 	r.Run(":8080")
 }
