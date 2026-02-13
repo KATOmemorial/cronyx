@@ -1,0 +1,28 @@
+system:
+  app_name: "cronyx"
+  env: "dev"  # dev, test, prod
+  version: "v2.0.0"
+
+server:
+  http_port: 8080
+  grpc_port: 9090
+
+mysql:
+  dsn: "root:root@tcp(localhost:3306)/cronyx?charset=utf8mb4&parseTime=True&loc=Local"
+  max_idle: 10
+  max_open: 100
+
+redis:
+  addr: "localhost:6379"
+  password: ""
+  db: 0
+
+kafka:
+  brokers: 
+    - "localhost:9092"
+  topic: "cronyx-jobs"
+
+etcd:
+  endpoints:
+    - "localhost:2379"
+  dial_timeout: 5

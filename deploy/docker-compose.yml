@@ -40,3 +40,13 @@ services:
       KAFKA_CREATE_TOPICS: "cronyx-jobs:1:1"
     depends_on:
       - zookeeper
+
+  etcd:
+    image: bitnami/etcd:latest
+    container_name: cronyx-etcd
+    environment:
+      - ALLOW_NONE_AUTHENTICATION=yes
+      - ETCD_ADVERTISE_CLIENT_URLS=http://etcd:2379
+    ports:
+      - "2379:2379"
+      - "2380:2380"

@@ -1,0 +1,26 @@
+syntax = "proto3";
+
+package proto;
+
+// 指定 Go 代码生成的包路径
+option go_package = "github.com/KATOmemorial/cronyx/api/proto";
+
+// 定义 Worker 服务
+service WorkerService {
+  // 1. 强杀任务
+  rpc StopTask (StopRequest) returns (StopReply);
+  
+  // 2. (未来扩展) 获取实时日志流
+  // rpc WatchLog (LogRequest) returns (stream LogBatch);
+}
+
+// 请求参数：只需要知道要杀哪个任务 (RunID)
+message StopRequest {
+  string task_id = 1; 
+}
+
+// 响应参数：告诉 API 成功没
+message StopReply {
+  bool success = 1;
+  string message = 2;
+}
