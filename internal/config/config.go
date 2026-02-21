@@ -3,11 +3,12 @@ package config
 import (
 	"log"
 
+	"github.com/google/wire"
 	"github.com/spf13/viper"
 )
 
-// 全局配置变量
-var AppConfig Config
+// ProviderSet 导出给 Wire 使用
+var ProviderSet = wire.NewSet(NewConfig)
 
 type Config struct {
 	System SystemConfig `mapstructure:"system"`
@@ -21,6 +22,7 @@ type Config struct {
 type SystemConfig struct {
 	AppName string `mapstructure:"app_name"`
 	Env     string `mapstructure:"env"`
+	Version string `mapstructure:"version"`
 }
 
 type ServerConfig struct {
@@ -50,18 +52,22 @@ type EtcdConfig struct {
 	DialTimeout int      `mapstructure:"dial_timeout"`
 }
 
-// LoadConfig 加载配置
-func LoadConfig(path string) {
-	viper.SetConfigFile(path)
+// NewConfig 加载配置并返回对象
+// 注意：这里的路径 ./configs/config.yaml 是相对于执行命令的目录
+// 如果你在 IDE 中运行，请确保工作目录正确
+func NewConfig() *Config {
+	viper.SetConfigFile("./configs/config.yaml")
 	viper.SetConfigType("yaml")
 
 	if err := viper.ReadInConfig(); err != nil {
 		log.Fatalf("Error reading config file: %s", err)
 	}
 
-	if err := viper.Unmarshal(&AppConfig); err != nil {
+	var conf Config
+	if err := viper.Unmarshal(&conf); err != nil {
 		log.Fatalf("Unable to decode into struct: %v", err)
 	}
 
-	log.Println("Config loaded successfully from", path)
+	log.Println("Config loaded successfully")
+	return &conf
 }

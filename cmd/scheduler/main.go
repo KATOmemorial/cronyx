@@ -7,78 +7,53 @@ import (
 	"time"
 
 	"github.com/IBM/sarama"
-	"github.com/KATOmemorial/cronyx/internal/common"
-	"github.com/KATOmemorial/cronyx/internal/config"
-	"github.com/KATOmemorial/cronyx/internal/model"
 	"github.com/robfig/cron/v3"
 	"go.uber.org/zap"
+
+	"github.com/KATOmemorial/cronyx/internal/common"
+	"github.com/KATOmemorial/cronyx/internal/model"
 )
 
-func main() {
-	// 1. 加载配置
-	config.LoadConfig("./configs/config.yaml")
+// Run 启动调度器主循环
+func (app *App) Run() {
+	app.logger.Info("🚀 Distributed Scheduler started", zap.String("env", app.conf.System.Env))
 
-	// 2. 初始化日志
-	common.InitLogger()
+	// 1. 启动后台竞选 Leader
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	// 3. 初始化 DB & Redis
-	common.InitDB()
-	common.InitRedis()
+	ip, _ := common.GetOutboundIP()
+	nodeVal := fmt.Sprintf("%s-%d", ip, time.Now().UnixNano())
 
-	// 4. Kafka 配置 (从配置读取)
-	saramaConfig := sarama.NewConfig()
-	saramaConfig.Producer.Return.Successes = true
-	// 使用配置里的 Brokers
-	producer, err := sarama.NewSyncProducer(config.AppConfig.Kafka.Brokers, saramaConfig)
-	if err != nil {
-		common.Log.Fatal("Failed to start Kafka producer", zap.Error(err))
-	}
-	defer producer.Close()
-
-	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
-
-	common.Log.Info("Distributed Scheduler started!", zap.String("env", config.AppConfig.System.Env))
+	// "/cronyx/election/scheduler" 是所有调度器竞选的同一个“王座”
+	app.election.Campaign(ctx, "/cronyx/election/scheduler", nodeVal)
 
 	// 2. 调度主循环
+	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
 	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
 	for range ticker.C {
+		// 🔥 核心逻辑：如果我不是 Leader，我就什么都不干，直接跳过！
+		if !app.election.IsLeader() {
+			continue
+		}
+
+		// --- 下面只有 Leader 才会执行 ---
 		var jobs []model.JobInfo
 		now := time.Now()
 
 		// A. 扫描任务
-		if err := common.DB.Where("status = ? AND next_time <= ?", 1, now.Unix()).Find(&jobs).Error; err != nil {
-			common.Log.Error("Failed to fetch jobs", zap.Error(err))
+		if err := app.data.DB.Where("status = ? AND next_time <= ?", 1, now.Unix()).Find(&jobs).Error; err != nil {
+			app.logger.Error("Failed to fetch jobs", zap.Error(err))
 			continue
 		}
 
-		// B. 遍历处理 (带分布式锁)
+		// B. 遍历处理 (不需要 Redis 锁了！)
 		for _, job := range jobs {
-			// --- 抢锁开始 ---
+			app.logger.Info("📅 Scheduling job", zap.Uint("job_id", job.ID), zap.String("name", job.Name))
 
-			// 锁的 Key：cronyx:lock:任务ID:本次计划执行时间
-			// 这样设计是为了保证：同一个任务的同一个执行周期，只能被锁一次
-			lockKey := fmt.Sprintf("cronyx:lock:%d:%d", job.ID, job.NextTime)
-
-			// SetNX (Set if Not Exists)
-			// 参数：Context, Key, Value, Expiration
-			// 锁有效期设为 5 秒 (防止死锁，5秒后自动释放)
-			acquired, err := common.RDB.SetNX(context.Background(), lockKey, 1, 5*time.Second).Result()
-			if err != nil {
-				common.Log.Error("Redis lock Error", zap.Uint("job_id", job.ID), zap.Error(err))
-				continue
-			}
-
-			if !acquired {
-				// 没抢到锁，说明别的节点正在处理，我直接跳过
-				common.Log.Info(" Job locked by another node, skipping...\n", zap.Uint("job_id", job.ID), zap.Int64("next_time", job.NextTime))
-				continue
-			}
-
-			// --- 锁成功，开始干活 ---
-
-			common.Log.Info("   Lock acquired for Job, executing...", zap.Uint("job_id", job.ID), zap.String("name", job.Name))
-
-			// 1. 发送 Kafka
+			// 发送 Kafka
 			taskID := fmt.Sprintf("%d-%d", job.ID, now.Unix())
 			event := common.TaskEvent{
 				TaskID:    taskID,
@@ -86,25 +61,37 @@ func main() {
 				Timestamp: now.Unix(),
 			}
 			bytes, _ := json.Marshal(event)
+
 			msg := &sarama.ProducerMessage{
-				Topic: config.AppConfig.Kafka.Topic,
+				Topic: app.conf.Kafka.Topic,
 				Value: sarama.ByteEncoder(bytes),
 			}
-			_, _, err = producer.SendMessage(msg)
-			if err != nil {
-				common.Log.Error("Failed to send to kafka", zap.Uint("job_id", job.ID), zap.Error(err))
+
+			if _, _, err := app.producer.SendMessage(msg); err != nil {
+				app.logger.Error("Failed to send to Kafka", zap.Error(err))
 				continue
 			}
 
-			// 2. 计算下次时间并更新 DB
+			// 计算并更新下次时间
 			schedule, err := parser.Parse(job.CronExpr)
 			if err != nil {
-				common.Log.Error("Invalid CronExpr", zap.Uint("job_id", job.ID), zap.Error(err))
+				app.logger.Error("Invalid CronExpr", zap.Error(err))
 				continue
 			}
 			nextTime := schedule.Next(now)
-			common.DB.Model(&job).Update("next_time", nextTime.Unix())
-			common.Log.Info("Job rescheduled", zap.Uint("job_id", job.ID), zap.Time("next_run", nextTime))
+			app.data.DB.Model(&job).Update("next_time", nextTime.Unix())
+
+			app.logger.Info("✅ Job rescheduled", zap.Uint("job_id", job.ID), zap.Time("next_run", nextTime))
 		}
 	}
+}
+
+func main() {
+	app, cleanup, err := initApp()
+	if err != nil {
+		panic(err)
+	}
+	defer cleanup()
+
+	app.Run()
 }

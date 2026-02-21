@@ -4,194 +4,134 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net"
 	"os"
-	"os/exec"
 	"os/signal"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
-	"time"
 
 	"github.com/IBM/sarama"
+	"github.com/panjf2000/ants/v2"
 	"go.uber.org/zap"
-	"google.golang.org/grpc"
 
-	"github.com/KATOmemorial/cronyx/api/proto"
 	"github.com/KATOmemorial/cronyx/internal/common"
-	"github.com/KATOmemorial/cronyx/internal/config"
-	"github.com/KATOmemorial/cronyx/internal/discovery"
-	"github.com/KATOmemorial/cronyx/internal/model"
 )
 
-// --- 全局任务管理器 ---
-// 用来存储正在运行的任务，以便 Kill 掉它们
-var (
-	taskMap  = make(map[string]context.CancelFunc)
-	taskLock sync.Mutex
-)
-
-// --- gRPC 服务实现 ---
-type WorkerServer struct {
-	proto.UnimplementedWorkerServiceServer
+// ConsumerHandler 实现 sarama.ConsumerGroupHandler 接口
+type ConsumerHandler struct {
+	app  *App
+	pool *ants.Pool
 }
 
-// StopTask 实现 gRPC 接口：强杀任务
-func (s *WorkerServer) StopTask(ctx context.Context, req *proto.StopRequest) (*proto.StopReply, error) {
-	targetID := req.TaskId // 可能是 "101-123456" (精确) 或 "101" (模糊)
-	common.Log.Info("🔪 Received Kill Request", zap.String("target", targetID))
+func (h *ConsumerHandler) Setup(sarama.ConsumerGroupSession) error   { return nil }
+func (h *ConsumerHandler) Cleanup(sarama.ConsumerGroupSession) error { return nil }
 
-	killedCount := 0
+// ConsumeClaim 核心消费逻辑
+func (h *ConsumerHandler) ConsumeClaim(session sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
+	for msg := range claim.Messages() {
+		m := msg // 拷贝，防止闭包坑
 
-	taskLock.Lock()
-	defer taskLock.Unlock()
-
-	for taskID, cancel := range taskMap {
-		// 逻辑：如果 taskMap 里的 Key 包含了 targetID，就杀掉
-		// 例如：正在跑 "101-17000"，目标是 "101"，匹配成功！
-		if strings.HasPrefix(taskID, targetID) {
-			cancel()                // 杀！
-			delete(taskMap, taskID) // 移除
-			killedCount++
-			common.Log.Warn("💀 Task killed", zap.String("task_id", taskID))
-		}
-	}
-
-	if killedCount == 0 {
-		return &proto.StopReply{Success: false, Message: "No matching task found"}, nil
-	}
-
-	return &proto.StopReply{Success: true, Message: fmt.Sprintf("Killed %d tasks", killedCount)}, nil
-}
-
-func main() {
-	// 1. 初始化
-	config.LoadConfig("./configs/config.yaml")
-	common.InitLogger()
-	common.InitDB()
-
-	// 2. 服务注册
-	ip, err := common.GetOutboundIP()
-	if err != nil {
-		common.Log.Fatal("Failed to get local IP", zap.Error(err))
-	}
-
-	// gRPC 端口
-	grpcPort := config.AppConfig.Server.GrpcPort
-	addr := fmt.Sprintf("%s:%d", ip, grpcPort)
-
-	register := discovery.NewServiceRegister()
-	err = register.Register("/cronyx/worker/"+addr, addr, 10)
-	if err != nil {
-		common.Log.Fatal("Failed to register to Etcd", zap.Error(err))
-	}
-	defer register.Close()
-	common.Log.Info("Worker registered", zap.String("addr", addr))
-
-	// --- 3. 启动 gRPC Server (新增) ---
-	go func() {
-		lis, err := net.Listen("tcp", fmt.Sprintf(":%d", grpcPort))
-		if err != nil {
-			common.Log.Fatal("Failed to listen gRPC", zap.Error(err))
-		}
-
-		s := grpc.NewServer()
-		// 注册服务
-		proto.RegisterWorkerServiceServer(s, &WorkerServer{})
-
-		common.Log.Info("gRPC Server started", zap.Int("port", grpcPort))
-		if err := s.Serve(lis); err != nil {
-			common.Log.Fatal("Failed to serve gRPC", zap.Error(err))
-		}
-	}()
-
-	// 4. 启动 Kafka 消费者
-	saramaConfig := sarama.NewConfig()
-	consumer, err := sarama.NewConsumer(config.AppConfig.Kafka.Brokers, saramaConfig)
-	if err != nil {
-		common.Log.Fatal("Failed to start Kafka consumer", zap.Error(err))
-	}
-	defer consumer.Close()
-
-	partitionConsumer, err := consumer.ConsumePartition(config.AppConfig.Kafka.Topic, 0, sarama.OffsetNewest)
-	if err != nil {
-		common.Log.Fatal("Failed to consume partition", zap.Error(err))
-	}
-	defer partitionConsumer.Close()
-
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-
-	// 5. 消费循环
-	go func() {
-		for msg := range partitionConsumer.Messages() {
+		err := h.pool.Submit(func() {
 			var event common.TaskEvent
-			json.Unmarshal(msg.Value, &event)
+			json.Unmarshal(m.Value, &event)
 
-			common.Log.Info("⚡ Executing Job", zap.String("task_id", event.TaskID))
+			h.app.logger.Info("⚡ Executing Job", zap.String("task_id", event.TaskID))
 
-			// --- 核心：创建可取消的 Context ---
-			// 如果收到 gRPC 的 cancel()，这个 ctx.Done() 就会关闭
-			ctx, cancel := context.WithCancel(context.Background())
+			// 执行任务
+			output, err := h.app.executor.StartExecution(context.Background(), event.TaskID, event.Command)
 
-			// 存入 Map
-			taskLock.Lock()
-			taskMap[event.TaskID] = cancel
-			taskLock.Unlock()
-
-			// --- 执行命令 (使用 CommandContext) ---
-			// 这种方式启动的命令，一旦 ctx 被 cancel，进程会被自动 Kill
-			startTime := time.Now()
-			cmd := exec.CommandContext(ctx, "/bin/sh", "-c", event.Command)
-			output, err := cmd.CombinedOutput()
-			endTime := time.Now()
-
-			// 执行完（或者被Kill后），从 Map 清理掉
-			taskLock.Lock()
-			delete(taskMap, event.TaskID)
-			taskLock.Unlock()
-
-			// 判断是被 Kill 的还是自然失败的
 			status := 1
 			errMsg := ""
 			if err != nil {
 				status = 0
-				// 如果是 context canceled，说明是被强杀的
-				if ctx.Err() == context.Canceled {
-					errMsg = "Task killed by user"
-					common.Log.Warn("Task killed successfully", zap.String("task_id", event.TaskID))
-				} else {
-					errMsg = err.Error()
-					common.Log.Error("Execution failed", zap.Error(err))
-				}
-			} else {
-				common.Log.Info("Execution success")
+				errMsg = err.Error()
 			}
 
-			// JobID 解析逻辑 (简化)
+			// 解析 JobID
 			var jobID int
 			parts := strings.Split(event.TaskID, "-")
 			if len(parts) > 0 {
 				jobID, _ = strconv.Atoi(parts[0])
 			}
 
-			// 入库
-			jobLog := model.JobLog{
-				JobID:     uint(jobID),
-				Command:   event.Command,
-				Output:    string(output),
-				Error:     errMsg,
-				PlanTime:  event.Timestamp,
-				StartTime: startTime.UnixMilli(),
-				EndTime:   endTime.UnixMilli(),
-				Status:    status,
+			h.app.logger.Info("📊 Job Result",
+				zap.Int("job_id", jobID),
+				zap.String("output", output),
+				zap.String("error", errMsg),
+				zap.Int("status", status),
+			)
+
+			// 🔥 必须标记消息已消费，否则下次重启还会再次消费！
+			session.MarkMessage(m, "")
+		})
+
+		if err != nil {
+			h.app.logger.Error("Failed to submit to ants pool", zap.Error(err))
+		}
+	}
+	return nil
+}
+
+func (app *App) Run() {
+	app.grpcServer.Start()
+
+	ip, err := common.GetOutboundIP()
+	if err != nil {
+		app.logger.Fatal("Failed to get local IP", zap.Error(err))
+	}
+	addr := fmt.Sprintf("%s:%d", ip, app.conf.Server.GrpcPort)
+
+	err = app.registrar.Register("/cronyx/worker/"+addr, addr, 10)
+	if err != nil {
+		app.logger.Fatal("Failed to register to Etcd", zap.Error(err))
+	}
+	defer app.registrar.Close()
+	app.logger.Info("👷 Worker registered", zap.String("addr", addr))
+
+	pool, err := ants.NewPool(100)
+	if err != nil {
+		app.logger.Fatal("Failed to init ants pool", zap.Error(err))
+	}
+	defer pool.Release()
+
+	// 初始化 Handler
+	handler := &ConsumerHandler{
+		app:  app,
+		pool: pool,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// 启动消费者组消费 (它是一个死循环，需要放在 goroutine 里)
+	go func() {
+		for {
+			// `Consume` 应该在一个无限循环中被调用，因为当服务器端 rebalance 时，
+			// 这个函数会返回并需要被重新调用来获取新的 claims。
+			if err := app.consumerGroup.Consume(ctx, []string{app.conf.Kafka.Topic}, handler); err != nil {
+				app.logger.Error("Error from consumer", zap.Error(err))
 			}
-			common.DB.Create(&jobLog)
+			// 检查 ctx 是否被取消，若是则退出循环
+			if ctx.Err() != nil {
+				return
+			}
 		}
 	}()
 
-	common.Log.Info("Worker is running...")
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	app.logger.Info("✅ Worker is running with Consumer Group...")
 	<-sigChan
-	common.Log.Warn("Worker shutting down...")
+	app.logger.Warn("🛑 Worker shutting down...")
+}
+
+func main() {
+	app, cleanup, err := initApp()
+	if err != nil {
+		panic(err)
+	}
+	defer cleanup()
+
+	app.Run()
 }

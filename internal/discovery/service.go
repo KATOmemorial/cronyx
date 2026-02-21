@@ -11,27 +11,28 @@ import (
 	"github.com/KATOmemorial/cronyx/internal/config"
 )
 
-// ServiceRegister 服务注册器 (Worker 用)
+// ServiceRegister 服务注册器
 type ServiceRegister struct {
-	cli     *clientv3.Client // Etcd 客户端
-	leaseID clientv3.LeaseID // 租约 ID
-	key     string           // 注册的 Key
-	val     string           // 注册的 Value
+	cli     *clientv3.Client
+	leaseID clientv3.LeaseID
+	key     string
+	val     string
+	log     *zap.Logger
 }
 
-// NewServiceRegister 创建注册器
-func NewServiceRegister() *ServiceRegister {
-	// 1. 初始化 Etcd 客户端
+// NewServiceRegister 改造为依赖注入
+func NewServiceRegister(conf *config.Config, logger *zap.Logger) *ServiceRegister {
 	cli, err := clientv3.New(clientv3.Config{
-		Endpoints:   config.AppConfig.Etcd.Endpoints,
-		DialTimeout: time.Duration(config.AppConfig.Etcd.DialTimeout) * time.Second,
+		Endpoints:   conf.Etcd.Endpoints,
+		DialTimeout: time.Duration(conf.Etcd.DialTimeout) * time.Second,
 	})
 	if err != nil {
-		common.Log.Fatal("Failed to connect to Etcd", zap.Error(err))
+		logger.Fatal("Failed to connect to Etcd", zap.Error(err))
 	}
 
 	return &ServiceRegister{
 		cli: cli,
+		log: logger,
 	}
 }
 

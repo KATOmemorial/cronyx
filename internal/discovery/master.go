@@ -13,26 +13,28 @@ import (
 	"github.com/KATOmemorial/cronyx/internal/config"
 )
 
-// Master 服务发现客户端 (API/Scheduler 用)
+// Master 服务发现客户端
 type Master struct {
 	cli       *clientv3.Client
-	workerMap map[string]string // 本地缓存: IP -> Info
+	workerMap map[string]string
 	lock      sync.Mutex
+	log       *zap.Logger
 }
 
-func NewMaster() *Master {
-	// 初始化 Etcd 连接
+// NewMaster 改造为依赖注入：接收 conf 和 logger
+func NewMaster(conf *config.Config, logger *zap.Logger) *Master {
 	cli, err := clientv3.New(clientv3.Config{
-		Endpoints:   config.AppConfig.Etcd.Endpoints,
-		DialTimeout: time.Duration(config.AppConfig.Etcd.DialTimeout) * time.Second,
+		Endpoints:   conf.Etcd.Endpoints, // 使用传入的 conf
+		DialTimeout: time.Duration(conf.Etcd.DialTimeout) * time.Second,
 	})
 	if err != nil {
-		common.Log.Fatal("Failed to connect to Etcd", zap.Error(err))
+		logger.Fatal("Failed to connect to Etcd", zap.Error(err))
 	}
 
 	return &Master{
 		cli:       cli,
 		workerMap: make(map[string]string),
+		log:       logger,
 	}
 }
 
