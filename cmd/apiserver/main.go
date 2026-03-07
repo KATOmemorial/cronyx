@@ -7,24 +7,22 @@ import (
 )
 
 func main() {
-	// 1. 依赖注入初始化 (调用 wire 生成的代码)
-	// app 就是 *gin.Engine
+	// app 现在是 *App 结构体
 	app, cleanup, err := initApp()
 	if err != nil {
 		panic(err)
 	}
-	// 确保程序退出时关闭数据库连接
 	defer cleanup()
 
-	// 2. 为了获取端口号，我们还得手动加载一下配置
-	// (或者你也可以让 initApp 返回 *config.Config)
-	conf := config.NewConfig()
+	// 开启后台协程，实时监听 Etcd 中 Worker 节点的上下线！
+	app.Master.WatchWorkers()
 
-	// 3. 启动服务
+	conf := config.NewConfig()
 	addr := fmt.Sprintf(":%d", conf.Server.HttpPort)
 	fmt.Printf("🚀 API Server starting on %s\n", addr)
 
-	if err := app.Run(addr); err != nil {
+	// 启动 Http 服务
+	if err := app.Engine.Run(addr); err != nil {
 		panic(err)
 	}
 }

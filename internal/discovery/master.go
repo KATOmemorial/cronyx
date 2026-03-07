@@ -5,13 +5,15 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/wire"
 	"go.etcd.io/etcd/api/v3/mvccpb"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/zap"
 
-	"github.com/KATOmemorial/cronyx/internal/common"
 	"github.com/KATOmemorial/cronyx/internal/config"
 )
+
+var MasterProviderSet = wire.NewSet(NewMaster)
 
 // Master 服务发现客户端
 type Master struct {
@@ -43,7 +45,7 @@ func (m *Master) WatchWorkers() {
 	// 1. 先 Get 一次现有的所有 Worker
 	resp, err := m.cli.Get(context.Background(), "/cronyx/worker/", clientv3.WithPrefix())
 	if err != nil {
-		common.Log.Error("Failed to get existing workers", zap.Error(err))
+		m.log.Error("Failed to get existing workers", zap.Error(err))
 	} else {
 		for _, kv := range resp.Kvs {
 			m.addWorker(string(kv.Key), string(kv.Value))
@@ -88,7 +90,7 @@ func (m *Master) addWorker(key, value string) {
 	// key: /cronyx/worker/192.168.1.5:9999 -> ID: 192.168.1.5:9999
 	// 这里简单处理，直接用 key 做 ID，或者你可以解析一下 IP
 	m.workerMap[key] = value
-	common.Log.Info("Worker Added", zap.String("node", key))
+	m.log.Info("Worker Added", zap.String("node", key))
 }
 
 // 内部方法：删除 Worker
@@ -97,5 +99,5 @@ func (m *Master) delWorker(key string) {
 	defer m.lock.Unlock()
 
 	delete(m.workerMap, key)
-	common.Log.Warn("Worker Removed", zap.String("node", key))
+	m.log.Warn("Worker Removed", zap.String("node", key))
 }

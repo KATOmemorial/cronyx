@@ -11,6 +11,7 @@ import (
 	"github.com/KATOmemorial/cronyx/internal/common"
 	"github.com/KATOmemorial/cronyx/internal/config"
 	"github.com/KATOmemorial/cronyx/internal/data"
+	"github.com/KATOmemorial/cronyx/internal/discovery"
 	"github.com/KATOmemorial/cronyx/internal/server"
 	"github.com/KATOmemorial/cronyx/internal/service"
 	"github.com/gin-gonic/gin"
@@ -18,9 +19,8 @@ import (
 
 // Injectors from wire.go:
 
-// initApp 初始化整个应用
-// 返回 gin.Engine (用于启动 HTTP 服务) 和 cleanup 函数 (用于关闭 DB/Redis)
-func initApp() (*gin.Engine, func(), error) {
+// initApp 初始化应用，现在只返回一个 *App 主对象
+func initApp() (*App, func(), error) {
 	configConfig := config.NewConfig()
 	logger := common.NewLogger(configConfig)
 	dataData, cleanup, err := data.NewData(configConfig, logger)
@@ -29,9 +29,27 @@ func initApp() (*gin.Engine, func(), error) {
 	}
 	jobRepo := data.NewJobRepo(dataData, logger)
 	jobUseCase := biz.NewJobUseCase(jobRepo, logger)
-	jobService := service.NewJobService(jobUseCase)
+	master := discovery.NewMaster(configConfig, logger)
+	jobService := service.NewJobService(jobUseCase, master, logger)
 	engine := server.NewHTTPServer(configConfig, jobService)
-	return engine, func() {
+	app := NewApp(engine, master)
+	return app, func() {
 		cleanup()
 	}, nil
+}
+
+// wire.go:
+
+// App 定义一个结构体来包裹我们需要的所有组件
+type App struct {
+	Engine *gin.Engine
+	Master *discovery.Master
+}
+
+// NewApp 构造函数
+func NewApp(engine *gin.Engine, master *discovery.Master) *App {
+	return &App{
+		Engine: engine,
+		Master: master,
+	}
 }

@@ -11,19 +11,35 @@ import (
 	"github.com/KATOmemorial/cronyx/internal/common"
 	"github.com/KATOmemorial/cronyx/internal/config"
 	"github.com/KATOmemorial/cronyx/internal/data"
+	"github.com/KATOmemorial/cronyx/internal/discovery"
 	"github.com/KATOmemorial/cronyx/internal/server"
 	"github.com/KATOmemorial/cronyx/internal/service"
 )
 
-// initApp 初始化整个应用
-// 返回 gin.Engine (用于启动 HTTP 服务) 和 cleanup 函数 (用于关闭 DB/Redis)
-func initApp() (*gin.Engine, func(), error) {
+// App 定义一个结构体来包裹我们需要的所有组件
+type App struct {
+	Engine *gin.Engine
+	Master *discovery.Master
+}
+
+// NewApp 构造函数
+func NewApp(engine *gin.Engine, master *discovery.Master) *App {
+	return &App{
+		Engine: engine,
+		Master: master,
+	}
+}
+
+// initApp 初始化应用，现在只返回一个 *App 主对象
+func initApp() (*App, func(), error) {
 	panic(wire.Build(
-		config.ProviderSet,  // 1. Config
-		common.ProviderSet,  // 2. Logger
-		data.ProviderSet,    // 3. Data (DB/Redis) & Repo
-		biz.ProviderSet,     // 4. Biz (UseCase)
-		service.ProviderSet, // 5. Service (HTTP Handlers)
-		server.ProviderSet,  // 6. Server (Gin Engine)
+		config.ProviderSet,
+		common.ProviderSet,
+		data.ProviderSet,
+		discovery.MasterProviderSet,
+		biz.ProviderSet,
+		service.ProviderSet,
+		server.ProviderSet,
+		NewApp, // 👈 告诉 Wire 怎么组装 App
 	))
 }

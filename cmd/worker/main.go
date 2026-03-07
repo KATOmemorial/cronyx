@@ -9,12 +9,14 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time" // 👈 新增引入 time 包
 
 	"github.com/IBM/sarama"
 	"github.com/panjf2000/ants/v2"
 	"go.uber.org/zap"
 
 	"github.com/KATOmemorial/cronyx/internal/common"
+	"github.com/KATOmemorial/cronyx/internal/model" // 👈 新增引入 model 包
 )
 
 // ConsumerHandler 实现 sarama.ConsumerGroupHandler 接口
@@ -37,8 +39,14 @@ func (h *ConsumerHandler) ConsumeClaim(session sarama.ConsumerGroupSession, clai
 
 			h.app.logger.Info("⚡ Executing Job", zap.String("task_id", event.TaskID))
 
+			// 记录执行开始时间 (毫秒)
+			startTime := time.Now().UnixMilli()
+
 			// 执行任务
 			output, err := h.app.executor.StartExecution(context.Background(), event.TaskID, event.Command)
+
+			// 记录执行结束时间 (毫秒)
+			endTime := time.Now().UnixMilli()
 
 			status := 1
 			errMsg := ""
@@ -54,12 +62,26 @@ func (h *ConsumerHandler) ConsumeClaim(session sarama.ConsumerGroupSession, clai
 				jobID, _ = strconv.Atoi(parts[0])
 			}
 
-			h.app.logger.Info("📊 Job Result",
-				zap.Int("job_id", jobID),
-				zap.String("output", output),
-				zap.String("error", errMsg),
-				zap.Int("status", status),
-			)
+			// --- 👇 核心改造：组装日志对象并写入 MySQL ---
+			jobLog := &model.JobLog{
+				JobID:     uint(jobID),
+				Command:   event.Command,
+				Output:    output,
+				Error:     errMsg,
+				PlanTime:  event.Timestamp * 1000, // Scheduler 传过来的是秒级时间戳，转为毫秒
+				RealTime:  event.Timestamp * 1000, // 简单起见，实际调度时间暂与计划时间一致
+				StartTime: startTime,
+				EndTime:   endTime,
+				Status:    status,
+			}
+
+			// 调用我们之前在 repo 中写好的 CreateLog 方法
+			if dbErr := h.app.repo.CreateLog(context.Background(), jobLog); dbErr != nil {
+				h.app.logger.Error("Failed to save job log", zap.Error(dbErr))
+			} else {
+				h.app.logger.Info("💾 Job log saved to database", zap.Uint("job_id", jobLog.JobID))
+			}
+			// --- 👆 核心改造结束 ---
 
 			// 🔥 必须标记消息已消费，否则下次重启还会再次消费！
 			session.MarkMessage(m, "")
@@ -79,7 +101,7 @@ func (app *App) Run() {
 	if err != nil {
 		app.logger.Fatal("Failed to get local IP", zap.Error(err))
 	}
-	addr := fmt.Sprintf("%s:%d", ip, app.conf.Server.GrpcPort)
+	addr := fmt.Sprintf(":%d", ip, app.conf.Server.GrpcPort)
 
 	err = app.registrar.Register("/cronyx/worker/"+addr, addr, 10)
 	if err != nil {
@@ -103,15 +125,12 @@ func (app *App) Run() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// 启动消费者组消费 (它是一个死循环，需要放在 goroutine 里)
+	// 启动消费者组消费
 	go func() {
 		for {
-			// `Consume` 应该在一个无限循环中被调用，因为当服务器端 rebalance 时，
-			// 这个函数会返回并需要被重新调用来获取新的 claims。
 			if err := app.consumerGroup.Consume(ctx, []string{app.conf.Kafka.Topic}, handler); err != nil {
 				app.logger.Error("Error from consumer", zap.Error(err))
 			}
-			// 检查 ctx 是否被取消，若是则退出循环
 			if ctx.Err() != nil {
 				return
 			}

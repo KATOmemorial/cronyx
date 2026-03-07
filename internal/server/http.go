@@ -28,6 +28,7 @@ func NewHTTPServer(conf *config.Config, job *service.JobService) *gin.Engine {
 		v1.POST("/job", job.CreateHandler)
 		v1.GET("/jobs", job.ListHandler)
 		v1.POST("/job/kill", job.KillHandler)
+		v1.GET("/job/:id/logs", job.LogHandler)
 	}
 
 	return r
